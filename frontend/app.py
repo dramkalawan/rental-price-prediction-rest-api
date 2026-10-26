@@ -3,8 +3,32 @@ import pandas as pd
 import requests
 import os
 
+
+
+def resolve_backend_url():
+    configured = os.getenv("BACKEND_URL", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(configured.rstrip('/'))
+    candidates.extend([
+        "http://localhost:7860",
+        "http://127.0.0.1:7860",
+        "http://backend:7860",
+        "http://bnb-backend:7860",
+    ])
+
+    for url in candidates:
+        try:
+            response = requests.get(f"{url}/", timeout=1)
+            if response.status_code < 500:
+                return url
+        except requests.RequestException:
+            continue
+    return candidates[0] if candidates else "http://localhost:7860"
+
+
 # Base URL of the Flask backend
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:7860")
+BACKEND_URL = resolve_backend_url()
 
 # Set the title of the Streamlit app
 st.title("Airbnb Rental Price Prediction")
@@ -38,12 +62,19 @@ input_data = pd.DataFrame([{
 
 # Make prediction when the "Predict" button is clicked
 if st.button("Predict", type="primary"):
-    response = requests.post(f"{BACKEND_URL}/v1/rental", json=input_data.to_dict(orient='records')[0])  # Send data to Flask API
-    if response.status_code == 200:
-        prediction = response.json()['Predicted Price (in dollars)']
-        st.success(f"Predicted Rental Price (in dollars): {prediction}")
-    else:
-        st.error("Unable to connect to the prediction API.")
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/v1/rental",
+            json=input_data.to_dict(orient='records')[0],
+            timeout=10,
+        )
+        if response.status_code == 200:
+            prediction = response.json()['Predicted Price (in dollars)']
+            st.success(f"Predicted Rental Price (in dollars): {prediction}")
+        else:
+            st.error(f"Prediction API returned an error: {response.status_code}")
+    except requests.RequestException as exc:
+        st.error(f"Unable to connect to the prediction API at {BACKEND_URL}: {exc}")
 
 # Section for batch prediction
 st.subheader("Batch Prediction")
@@ -54,10 +85,17 @@ uploaded_file = st.file_uploader("Upload CSV file for batch prediction", type=["
 # Make batch prediction when the "Predict Batch" button is clicked
 if uploaded_file is not None:
     if st.button("Predict Batch", type="primary"):
-        response = requests.post(f"{BACKEND_URL}/v1/rentalbatch", files={"file": uploaded_file})  # Send file to Flask API
-        if response.status_code == 200:
-            predictions = response.json()
-            st.success("Batch predictions completed!")
-            st.write(predictions)  # Display the predictions
-        else:
-            st.error("Unable to connect to the prediction API.")
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/v1/rentalbatch",
+                files={"file": uploaded_file},
+                timeout=20,
+            )
+            if response.status_code == 200:
+                predictions = response.json()
+                st.success("Batch predictions completed!")
+                st.write(predictions)
+            else:
+                st.error(f"Batch prediction API returned an error: {response.status_code}")
+        except requests.RequestException as exc:
+            st.error(f"Unable to connect to the prediction API at {BACKEND_URL}: {exc}")
