@@ -1,93 +1,91 @@
 # Import necessary libraries
+import os
+from pathlib import Path
+
 import numpy as np
-import joblib  # For loading the serialized model
-import pandas as pd  # For data manipulation
-from flask import Flask, request, jsonify  # For creating the Flask API
+import joblib
+import pandas as pd
+from flask import Flask, request, jsonify
 
 # Initialize the Flask application
 rental_price_predictor_api = Flask("Airbnb Rental Price Predictor")
 
-# Load the trained machine learning model
-model = joblib.load("rental_price_prediction_model_v1_0.joblib")
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "rental_price_prediction_model_v1_0.joblib"
 
-# Define a route for the home page (GET request)
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+
+# Load the trained machine learning model
+model = joblib.load(MODEL_PATH)
+
+REQUIRED_COLUMNS = [
+    "room_type",
+    "accommodates",
+    "bathrooms",
+    "cancellation_policy",
+    "cleaning_fee",
+    "instant_bookable",
+    "review_scores_rating",
+    "bedrooms",
+    "beds",
+]
+
+
 @rental_price_predictor_api.get('/')
 def home():
-    """
-    This function handles GET requests to the root URL ('/') of the API.
-    It returns a simple welcome message.
-    """
+    """Return a welcome message for the API."""
     return "Welcome to the Airbnb Rental Price Prediction API!"
 
-# Define an endpoint for single property prediction (POST request)
+
 @rental_price_predictor_api.post('/v1/rental')
 def predict_rental_price():
-    """
-    This function handles POST requests to the '/v1/rental' endpoint.
-    It expects a JSON payload containing property details and returns
-    the predicted rental price as a JSON response.
-    """
-    # Get the JSON data from the request body
-    property_data = request.get_json()
+    """Predict the rent price for a single property."""
+    property_data = request.get_json(silent=True)
+    if not property_data:
+        return jsonify({"error": "Request body must be a JSON object."}), 400
 
-    # Extract relevant features from the JSON data
-    sample = {
-        'room_type': property_data['room_type'],
-        'accommodates': property_data['accommodates'],
-        'bathrooms': property_data['bathrooms'],
-        'cancellation_policy': property_data['cancellation_policy'],
-        'cleaning_fee': property_data['cleaning_fee'],
-        'instant_bookable': property_data['instant_bookable'],
-        'review_scores_rating': property_data['review_scores_rating'],
-        'bedrooms': property_data['bedrooms'],
-        'beds': property_data['beds']
-    }
+    missing = [column for column in REQUIRED_COLUMNS if column not in property_data]
+    if missing:
+        return jsonify({"error": f"Missing required fields: {missing}"}), 400
 
-    # Convert the extracted data into a Pandas DataFrame
+    sample = {key: property_data[key] for key in REQUIRED_COLUMNS}
     input_data = pd.DataFrame([sample])
 
-    # Make prediction (get log_price)
     predicted_log_price = model.predict(input_data)[0]
+    predicted_price = round(float(np.exp(predicted_log_price)), 2)
 
-    # Calculate actual price
-    predicted_price = np.exp(predicted_log_price)
-
-    # Convert predicted_price to Python float
-    predicted_price = round(float(predicted_price), 2)
-    # The conversion above is needed as we convert the model prediction (log price) to actual price using np.exp, which returns predictions as NumPy float32 values.
-    # When we send this value directly within a JSON response, Flask's jsonify function encounters a datatype error
-
-    # Return the actual price
-    return jsonify({'Predicted Price (in dollars)': predicted_price})
+    return jsonify({"Predicted Price (in dollars)": predicted_price})
 
 
-# Define an endpoint for batch prediction (POST request)
 @rental_price_predictor_api.post('/v1/rentalbatch')
 def predict_rental_price_batch():
-    """
-    This function handles POST requests to the '/v1/rentalbatch' endpoint.
-    It expects a CSV file containing property details for multiple properties
-    and returns the predicted rental prices as a dictionary in the JSON response.
-    """
-    # Get the uploaded CSV file from the request
-    file = request.files['file']
+    """Predict rental prices for a batch of properties from a CSV upload."""
+    uploaded_file = request.files.get('file')
+    if uploaded_file is None:
+        return jsonify({"error": "No file uploaded. Please send a CSV file under the 'file' field."}), 400
 
-    # Read the CSV file into a Pandas DataFrame
-    input_data = pd.read_csv(file)
+    try:
+        input_data = pd.read_csv(uploaded_file)
+    except Exception as exc:
+        return jsonify({"error": f"Could not read uploaded CSV: {exc}"}), 400
 
-    # Make predictions for all properties in the DataFrame (get log_prices)
+    missing_cols = [column for column in REQUIRED_COLUMNS if column not in input_data.columns]
+    if missing_cols:
+        return jsonify({"error": f"CSV missing required fields: {missing_cols}"}), 400
+
     predicted_log_prices = model.predict(input_data).tolist()
-
-    # Calculate actual prices
     predicted_prices = [round(float(np.exp(log_price)), 2) for log_price in predicted_log_prices]
 
-    # Create a dictionary of predictions with property IDs as keys
-    property_ids = input_data['id'].tolist()  # Assuming 'id' is the property ID column
-    output_dict = dict(zip(property_ids, predicted_prices))  # Use actual prices
+    output = {}
+    if 'id' in input_data.columns:
+        property_ids = input_data['id'].tolist()
+        output = dict(zip(property_ids, predicted_prices))
+    else:
+        output = {str(index): price for index, price in enumerate(predicted_prices)}
 
-    # Return the predictions dictionary as a JSON response
-    return output_dict
+    return output
 
-# Run the Flask application in debug mode if this script is executed directly
+
 if __name__ == '__main__':
-    rental_price_predictor_api.run(debug=True)
+    rental_price_predictor_api.run(host="0.0.0.0", port=7860, debug=True)
